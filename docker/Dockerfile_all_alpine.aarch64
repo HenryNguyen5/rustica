@@ -1,0 +1,37 @@
+#FROM rust:1.65 as builder
+#FROM messense/rust-musl-cross:aarch64-musl as builder
+FROM alpine:latest as builder
+
+RUN apk add -U --no-cache ca-certificates rustup pkgconfig pcsc-lite-libs pcsc-lite-dev alpine-sdk autoconf automake protoc musl
+
+#RUN ldd /usr/lib/libpcsclite.so.1 && false
+
+#RUN git clone https://salsa.debian.org/rousseau/PCSC.git
+#RUN cd PCSC && ./bootstrap && ./configure && make && make install
+
+
+RUN rustup-init -y
+
+RUN mkdir /rustica
+COPY proto /tmp/proto
+COPY rustica /tmp/rustica
+WORKDIR /tmp/rustica
+
+
+#RUN /root/.cargo/bin/cargo build --features="yubikey-support" --release
+RUN /root/.cargo/bin/cargo build --features="" --release
+
+WORKDIR /
+RUN ls -lah /tmp/rustica/target/release/rustica
+RUN cp /tmp/rustica/target/release/rustica /bin/
+RUN LD_DEBUG=all /bin/rustica --help && false
+
+FROM alpine:latest
+RUN apk add -U --no-cache ca-certificates pcsc-lite-dev pcsc-lite-libs pcsc-lite eudev-dev libusb-dev libusb usbutils
+
+
+#COPY --from=builder /tmp/rustica/target/aarch64-unknown-linux-musl/release/rustica /rustica
+COPY --from=builder /tmp/rustica/target/release/rustica /rustica
+USER 1000
+ENTRYPOINT [ "/rustica" ]
+

@@ -125,6 +125,8 @@ pub struct Handler {
     /// Should we list the certificate or key first when we're asked to list
     /// identities
     pub certificate_priority: bool,
+    /// An open Yubikey PIV handle for repeated signs to speed up usage
+    pub cached_yubikey: Option<Yubikey>,
 }
 
 impl std::fmt::Debug for Handler {
@@ -275,6 +277,8 @@ impl SshAgentHandler for Handler {
                     key_blob: self.pubkey.encode().to_vec(),
                     key_comment: format!("Only key available, Certificate refresh error: {e}, "),
                 });
+
+                identities.append(&mut extra_identities);
             }
         }
         return Ok(Response::Identities(identities));
@@ -294,38 +298,37 @@ impl SshAgentHandler for Handler {
         let private_key: Option<&PrivateKey> = if self.identities.contains_key(&pubkey) {
             Some(&self.identities[&pubkey])
         } else if let Some(descriptor) = self.piv_identities.get(&pubkey) {
-            let mut yk = Yubikey::open(descriptor.serial).map_err(|e| {
-                println!("Unable to open Yubikey: {e}");
-                AgentError::from("Unable to open Yubikey")
-            })?;
-
-            if let Some(f) = &self.notification_function {
-                f()
+            // Notify the user we're about to sign
+            if let Some(send_notification) = &self.notification_function {
+                send_notification()
             }
 
-            if let Some(pin) = &descriptor.pin {
-                if let Err(e) = yk.unlock(
-                    pin.as_bytes(),
-                    &hex::decode("010203040506070801020304050607080102030405060708").unwrap(),
-                ) {
-                    println!("Unlock Error: {e}");
-                    let tries_remaining =
-                        yk.yk.get_pin_retries().map(|x| x as i32).map_err(|e| {
-                            println!(
-                                "Could not fetch pin retries [{e}] for Yubikey: {}",
-                                descriptor.serial
-                            );
-                            AgentError::from("Could not fetch pin retries")
-                        })?;
-                    println!("Could not unlock Yubikey: {tries_remaining} tries remaining");
-                    return Err(AgentError::from("Yubikey unlocking error"));
+            // Get a signature from the Yubikey utilizing the cached connection if possible
+            let signature = if let Some(ref mut yk) = self.cached_yubikey {
+                if yk.yk.serial().0 == descriptor.serial {
+                    yk.reconnect()
+                        .map_err(|_| AgentError::from("Yubikey connection error"))?;
+                    sign_with_yubikey_internal(yk, &data, descriptor)?
+                } else {
+                    let mut yk = Yubikey::open(descriptor.serial).map_err(|e| {
+                        println!("Unable to open Yubikey: {e}");
+                        AgentError::from("Unable to open Yubikey")
+                    })?;
+                    let signature = sign_with_yubikey_internal(&mut yk, &data, descriptor)?;
+
+                    self.cached_yubikey = Some(yk);
+                    signature
                 }
-            }
+            } else {
+                let mut yk = Yubikey::open(descriptor.serial).map_err(|e| {
+                    println!("Unable to open Yubikey: {e}");
+                    AgentError::from("Unable to open Yubikey")
+                })?;
+                let signature = sign_with_yubikey_internal(&mut yk, &data, descriptor)?;
 
-            let signature = yk.ssh_cert_signer(&data, &descriptor.slot).map_err(|e| {
-                println!("Signing Error: {e}");
-                AgentError::from("Yubikey signing error")
-            })?;
+                self.cached_yubikey = Some(yk);
+                signature
+            };
 
             return Ok(Response::SignResponse { signature });
         } else if let Signatory::Direct(privkey) = &self.signatory {
@@ -382,6 +385,35 @@ impl SshAgentHandler for Handler {
             None => Err(AgentError::from("Signing Error: No Valid Keys")),
         }
     }
+}
+
+fn sign_with_yubikey_internal(
+    yk: &mut Yubikey,
+    data: &[u8],
+    key_descriptor: &YubikeyPIVKeyDescriptor,
+) -> Result<Vec<u8>, AgentError> {
+    if let Some(ref pin) = key_descriptor.pin {
+        if let Err(e) = yk.unlock(
+            pin.as_bytes(),
+            &hex::decode("010203040506070801020304050607080102030405060708").unwrap(),
+        ) {
+            println!("Unlock Error: {e}");
+            let tries_remaining = yk.yk.get_pin_retries().map(|x| x as i32).map_err(|e| {
+                println!(
+                    "Could not fetch pin retries [{e}] for Yubikey: {}",
+                    yk.yk.serial().0
+                );
+                AgentError::from("Could not fetch pin retries")
+            })?;
+            println!("Could not unlock Yubikey: {tries_remaining} tries remaining");
+            return Err(AgentError::from("Yubikey unlocking error"));
+        }
+    }
+
+    yk.ssh_cert_signer(data, &key_descriptor.slot).map_err(|e| {
+        println!("Signing Error: {e}");
+        AgentError::from("Yubikey signing error")
+    })
 }
 
 /// Takes in a human readable slot descriptor and parses it into the Yubikey

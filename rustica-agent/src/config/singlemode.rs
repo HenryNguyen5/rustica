@@ -40,6 +40,7 @@ pub fn configure_singlemode(
         piv_identities: HashMap::new(),
         notification_function: None,
         certificate_priority: matches.is_present("certificate-priority"),
+        cached_yubikey: None,
     };
 
     Ok(RusticaAgentAction::Run(RunConfig {

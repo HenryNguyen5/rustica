@@ -591,6 +591,7 @@ pub unsafe extern "C" fn start_direct_rustica_agent_with_piv_idents(
         piv_identities,
         notification_function: Some(Box::new(notification_f)),
         certificate_priority,
+        cached_yubikey: None,
     };
 
     let socket = UnixListener::bind(socket_path).unwrap();
@@ -662,6 +663,7 @@ pub unsafe extern "C" fn start_yubikey_rustica_agent(
         piv_identities: HashMap::new(),
         notification_function: Some(Box::new(notification_f)),
         certificate_priority,
+        cached_yubikey: None,
     };
 
     println!("Slot: {:?}", SlotId::try_from(slot));
